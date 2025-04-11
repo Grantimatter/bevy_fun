@@ -1,0 +1,26 @@
+[package]
+name = "first_bevy_game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.15.0"
+bevy_replicon = "0.32.1"
+bevy_quinnet = "0.16.0"
+bevy_replicon_quinnet = "0.11.0"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"
