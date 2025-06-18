@@ -14,6 +14,13 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
+        rust = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+            "rustc-codegen-cranelift-preview"
+          ];
+        });
         buildInputs = with pkgs; [
             # Bevy Dependencies
             alsa-lib
@@ -25,6 +32,7 @@
             xorg.libXrandr
             libxkbcommon
             wayland
+            rust
         ];
       in
       {
@@ -34,8 +42,6 @@
             pkg-config
             eza
             fd
-            rust-bin.nightly."2025-03-13".default
-            rustfmt
           ] ++ buildInputs;
 
           shellHook = ''
