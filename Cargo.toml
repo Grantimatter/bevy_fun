@@ -8,7 +8,6 @@ edition = "2024"
 [dependencies]
 bevy = { version = "0.16.1", features = ["wayland"] }
 clap = { version = "4.5.36", features = ["derive"] }
-avian3d = "0.3.1"
 serde = "1.0.219"
 
 
@@ -16,7 +15,10 @@ serde = "1.0.219"
 # Wayland display server support
 # wayland = ["bevy_internal/wayland"]
 
-# [dev-dependencies]
+[dev-dependencies]
+avian2d = "0.3.1"
+avian3d = "0.3.1"
+rand = "0.9.1"
 # bevy_replicon = "0.32.1"
 # bevy_quinnet = "0.16.0"
 # bevy_replicon_quinnet = "0.11.0"
