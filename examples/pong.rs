@@ -208,7 +208,7 @@ fn spawn_ball(mut commands: Commands) {
         Scale(Vec2 { x: 4.0, y: 4.0 }),
         Speed(40.0),
         Velocity(Vec2 {
-            x: if random_range(0..2) == 0 { -1.0 } else { 1.0 },
+            x: if random_range(0..=1) == 0 { -1.0 } else { 1.0 },
             y: random_range(-1.0..1.0),
         }),
         BoxCollider {
