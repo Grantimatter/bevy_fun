@@ -1,4 +1,4 @@
-use bevy::{prelude::*, window::WindowResolution};
+use bevy::{log::tracing::Instrument, prelude::*, window::WindowResolution};
 use rand::random_range;
 
 pub const BASE: Color = Color::srgb(0.117647059, 0.117647059, 0.180392157);
@@ -30,32 +30,57 @@ struct Paddle {
 }
 
 #[derive(Component)]
-struct Controlling(bool);
-
-#[derive(Component)]
 struct Ball;
 
-#[derive(Component)]
+#[derive(Component, Default)]
+#[require(Transform)]
 struct Velocity(Vec2);
 
 #[derive(Component, Default)]
 struct InputDirection(Vec2);
 
-#[derive(Component)]
+#[derive(Component, Default)]
+#[require(Transform)]
 struct Speed(f32);
 
 #[derive(Component)]
+#[require(Transform)]
 struct Drag(f32);
+
+#[derive(Component)]
+#[require(Transform, Position, Velocity, Scale)]
+struct BoxCollider {
+    kinematic: bool,
+    friction: f32,
+}
+
+impl Default for BoxCollider {
+    fn default() -> BoxCollider {
+        BoxCollider {
+            kinematic: false,
+            friction: 0.1,
+        }
+    }
+}
+
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
 
 /// Position in screen space
 /// (0.0, 0.0) = Bottom left
-/// (1.0, 1.0) = Top Right
-#[derive(Component)]
+/// (100.0, 100.0) = Top Right
+#[derive(Component, Default)]
+#[require(Transform)]
 struct Position(Vec2);
 
 /// Scale as % of screen in the x and y axis
 /// (100, 100) is a rect that fills the window exactly
-#[derive(Component)]
+#[derive(Component, Default)]
+#[require(Transform)]
 struct Scale(Vec2);
 
 #[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -83,11 +108,24 @@ impl Plugin for PongPlugin {
         app.add_systems(PreUpdate, (handle_keyboard_input, handle_gamepad_input));
         app.add_systems(
             Update,
-            (apply_paddle_input, apply_drag, apply_velocity)
+            (
+                apply_paddle_input,
+                apply_drag,
+                apply_velocity,
+                handle_box_collisions,
+            )
                 .run_if(in_state(GamePhase::Rally))
                 .chain(),
         );
-        app.add_systems(PostUpdate, (position_translation, scale_to_window).chain());
+        app.add_systems(
+            PostUpdate,
+            (
+                position_translation,
+                scale_to_window,
+                draw_box_collider_gizmos,
+            )
+                .chain(),
+        );
         app.init_state::<GameState>();
         app.add_sub_state::<GamePhase>();
     }
@@ -99,64 +137,104 @@ fn setup(mut commands: Commands) {
 
     let paddle_sprite = Sprite::from_color(TEXT, Vec2 { x: 1.0, y: 1.0 });
 
+    // Spawn Barriers
+    commands.spawn((
+        Position(Vec2 { x: 50.0, y: 102.5 }),
+        Velocity(Vec2 { x: 0.0, y: 0.0 }),
+        Scale(Vec2 { x: 100.0, y: 5.0 }),
+        BoxCollider {
+            kinematic: true,
+            ..Default::default()
+        },
+    ));
+
+    commands.spawn((
+        Position(Vec2 { x: 50.0, y: -2.5 }),
+        Velocity(Vec2 { x: 0.0, y: 0.0 }),
+        Scale(Vec2 { x: 100.0, y: 5.0 }),
+        BoxCollider {
+            kinematic: true,
+            ..Default::default()
+        },
+    ));
+
     // Spawn Paddles
     commands.spawn((
+        Name::new("Left Paddle"),
         Paddle {
             player: 1,
             ..default()
         },
         paddle_sprite.clone(),
-        Position(Vec2 { x: 0.1, y: 0.5 }),
+        Position(Vec2 { x: 10.0, y: 50.0 }),
         Scale(Vec2 { x: 4.0, y: 20.0 }),
         Velocity(Vec2 { x: 0.0, y: 0.0 }),
         Speed(9.0),
         Drag(0.05),
+        BoxCollider {
+            kinematic: true,
+            ..Default::default()
+        },
     ));
 
     commands.spawn((
+        Name::new("Right Paddle"),
         Paddle {
             player: 2,
             ..default()
         },
         paddle_sprite,
-        Position(Vec2 { x: 0.9, y: 0.5 }),
+        Position(Vec2 { x: 90.0, y: 50.0 }),
         Scale(Vec2 { x: 4.0, y: 20.0 }),
         Velocity(Vec2 { x: 0.0, y: 0.0 }),
         Speed(9.0),
         Drag(0.05),
+        BoxCollider {
+            kinematic: true,
+            ..Default::default()
+        },
     ));
 
     // Spawn Ball
+    spawn_ball(commands);
+}
+
+fn spawn_ball(mut commands: Commands) {
     commands.spawn((
+        Name::new("Ball"),
         Ball,
         Sprite::from_color(TEXT, Vec2 { x: 1.0, y: 1.0 }),
-        Position(Vec2 { x: 0.5, y: 0.5 }),
+        Position(Vec2 { x: 50.0, y: 50.0 }),
         Scale(Vec2 { x: 4.0, y: 4.0 }),
-        Speed(20.0),
+        Speed(40.0),
         Velocity(Vec2 {
-            x: if random_range(0..1) == 0 { -1.0 } else { 1.0 },
-            y: random_range(-0.8..0.8),
+            x: if random_range(0..2) == 0 { -1.0 } else { 1.0 },
+            y: random_range(-1.0..1.0),
         }),
+        BoxCollider {
+            friction: 0.1,
+            ..Default::default()
+        },
     ));
 }
 
 fn position_translation(mut query: Query<(&Position, &mut Transform)>, window: Single<&Window>) {
     for (position, mut transform) in query.iter_mut() {
-        transform.translation.x = position.0.x * window.width() - (window.width() / 2.0);
-        transform.translation.y = position.0.y * window.height() - (window.height() / 2.0);
+        transform.translation.x = position.0.x * 0.01 * window.width() - (window.width() / 2.0);
+        transform.translation.y = position.0.y * 0.01 * window.height() - (window.height() / 2.0);
     }
 }
 
 fn scale_to_window(mut query: Query<(&Scale, &mut Transform)>, window: Single<&Window>) {
     for (scale, mut transform) in query.iter_mut() {
-        transform.scale.x = scale.0.x / 100.0 * window.width();
-        transform.scale.y = scale.0.y / 100.0 * window.height();
+        transform.scale.x = scale.0.x * 0.01 * window.width();
+        transform.scale.y = scale.0.y * 0.01 * window.height();
     }
 }
 
 fn apply_velocity(time: Res<Time>, mut query: Query<(&Velocity, &Speed, &mut Position)>) {
     for (velocity, speed, mut position) in query.iter_mut() {
-        position.0 += velocity.0 * speed.0 / 100.0 * time.delta_secs();
+        position.0 += velocity.0 * speed.0 * time.delta_secs();
     }
 }
 
@@ -171,11 +249,15 @@ fn apply_drag(time: Res<Time>, mut query: Query<(&mut Velocity, &Drag)>) {
 }
 
 fn handle_keyboard_input(
+    mut commands: Commands,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut Paddle>,
     game_state: Res<State<GameState>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
+    if keyboard_input.just_pressed(KeyCode::KeyR) {
+        spawn_ball(commands);
+    }
     for mut paddle in query.iter_mut() {
         if keyboard_input.just_pressed(KeyCode::Escape) {
             match game_state.get() {
@@ -235,10 +317,116 @@ fn apply_paddle_input(mut query: Query<(&Paddle, &Speed, &Position, &mut Velocit
 
         velocity.0.y = paddle.input_direction.0.y * speed.0;
 
-        if (position.0.y > 0.88 && velocity.0.y > 0.0)
-            || (position.0.y < 0.12 && velocity.0.y < 0.0)
+        if (position.0.y > 88.0 && velocity.0.y > 0.0)
+            || (position.0.y < 12.0 && velocity.0.y < 0.0)
         {
             velocity.0.y = 0.0;
         }
+    }
+}
+
+fn handle_box_collisions(
+    // mut colliders: ParamSet<(
+    //     Query<(Entity, &mut Velocity, &mut Position, &BoxCollider, &Scale)>,
+    //     Query<(Entity, &Position, &BoxCollider, &Scale)>,
+    // )>,
+    mut query: Query<(
+        NameOrEntity,
+        &mut Velocity,
+        &mut Position,
+        &BoxCollider,
+        &Scale,
+    )>,
+) {
+    fn edge_pos(
+        pos: &Position,
+        scale: &Scale,
+        vel: Option<&Velocity>,
+        direction: Direction,
+    ) -> f32 {
+        match direction {
+            Direction::Up => {
+                pos.0.y + scale.0.y / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.y
+            }
+            Direction::Down => {
+                pos.0.y - scale.0.y / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.y
+            }
+            Direction::Left => {
+                pos.0.x - scale.0.x / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.x
+            }
+            Direction::Right => {
+                pos.0.x + scale.0.x / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.x
+            }
+        }
+    }
+
+    let mut combos = query.iter_combinations_mut();
+    while let Some(
+        [
+            (entity_1, mut velocity_1, mut position_1, collider_1, scale_1),
+            (entity_2, mut velocity_2, mut position_2, collider_2, scale_2),
+        ],
+    ) = combos.fetch_next()
+    {
+        if entity_1.entity == entity_2.entity || (collider_1.kinematic && collider_2.kinematic) {
+            continue;
+        }
+
+        if edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Right)
+            > edge_pos(&position_2, &scale_2, None, Direction::Left)
+            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Left)
+                < edge_pos(&position_2, &scale_2, None, Direction::Right)
+            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Up)
+                > edge_pos(&position_2, &scale_2, None, Direction::Down)
+            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Down)
+                < edge_pos(&position_2, &scale_2, None, Direction::Up)
+        {
+            info!("{:?} colliding with {:?}", entity_1.name, entity_2.name);
+            if !collider_1.kinematic {
+                velocity_1.0.x *= -1.0;
+                velocity_1.0.y += velocity_2.0.y
+                    * ((collider_1.friction + collider_2.friction) / 2.0).clamp(0.0, 1.0);
+            }
+            if !collider_2.kinematic {
+                velocity_2.0.x *= -1.0;
+                velocity_2.0.y += velocity_1.0.y
+                    * ((collider_2.friction + collider_1.friction) / 2.0).clamp(0.0, 1.0);
+            }
+        }
+
+        if edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Right)
+            > edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Left)
+            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Left)
+                < edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Right)
+            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Up)
+                > edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Down)
+            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Down)
+                < edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Up)
+        {
+            if !collider_1.kinematic {
+                velocity_1.0.y *= -1.0;
+                velocity_1.0.x += velocity_2.0.x
+                    * ((collider_1.friction + collider_2.friction) / 2.0).clamp(0.0, 1.0);
+            }
+            if !collider_2.kinematic {
+                velocity_2.0.y *= -1.0;
+                velocity_2.0.x += velocity_1.0.x
+                    * ((collider_2.friction + collider_1.friction) / 2.0).clamp(0.0, 1.0);
+            }
+        }
+    }
+}
+
+fn draw_box_collider_gizmos(mut gizmos: Gizmos, query: Query<(&Transform, &BoxCollider)>) {
+    for (transform, collider) in query {
+        //     gizmos.rect_2d(
+        //         Isometry2d::from_translation(transform.translation.truncate()),
+        //         transform.scale.truncate(),
+        //         if collider.kinematic {
+        //             Color::srgb(1.0, 0.0, 0.0)
+        //         } else {
+        //             Color::srgb(0.0, 0.0, 1.0)
+        //         },
+        //     );
     }
 }
