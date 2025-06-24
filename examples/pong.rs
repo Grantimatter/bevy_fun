@@ -63,9 +63,9 @@ impl Default for BoxCollider {
     }
 }
 
-pub enum Direction {
-    Up,
-    Down,
+pub enum Edge {
+    Top,
+    Bottom,
     Left,
     Right,
 }
@@ -169,7 +169,7 @@ fn setup(mut commands: Commands) {
         Position(Vec2 { x: 10.0, y: 50.0 }),
         Scale(Vec2 { x: 4.0, y: 20.0 }),
         Velocity(Vec2 { x: 0.0, y: 0.0 }),
-        Speed(9.0),
+        Speed(80.0),
         Drag(0.05),
         BoxCollider {
             kinematic: true,
@@ -187,7 +187,7 @@ fn setup(mut commands: Commands) {
         Position(Vec2 { x: 90.0, y: 50.0 }),
         Scale(Vec2 { x: 4.0, y: 20.0 }),
         Velocity(Vec2 { x: 0.0, y: 0.0 }),
-        Speed(9.0),
+        Speed(80.0),
         Drag(0.05),
         BoxCollider {
             kinematic: true,
@@ -208,11 +208,15 @@ fn spawn_ball(mut commands: Commands) {
         Scale(Vec2 { x: 4.0, y: 4.0 }),
         Speed(40.0),
         Velocity(Vec2 {
-            x: if random_range(0..=1) == 0 { -1.0 } else { 1.0 },
-            y: random_range(-1.0..1.0),
+            x: if random_range(0..=1) == 0 {
+                -40.0
+            } else {
+                40.0
+            },
+            y: random_range(-1.0..1.0) * 40.0,
         }),
         BoxCollider {
-            friction: 0.1,
+            friction: 0.5,
             ..Default::default()
         },
     ));
@@ -232,9 +236,9 @@ fn scale_to_window(mut query: Query<(&Scale, &mut Transform)>, window: Single<&W
     }
 }
 
-fn apply_velocity(time: Res<Time>, mut query: Query<(&Velocity, &Speed, &mut Position)>) {
-    for (velocity, speed, mut position) in query.iter_mut() {
-        position.0 += velocity.0 * speed.0 * time.delta_secs();
+fn apply_velocity(time: Res<Time>, mut query: Query<(&Velocity, &mut Position)>) {
+    for (velocity, mut position) in query.iter_mut() {
+        position.0 += velocity.0 * time.delta_secs();
     }
 }
 
@@ -330,6 +334,7 @@ fn handle_box_collisions(
     //     Query<(Entity, &mut Velocity, &mut Position, &BoxCollider, &Scale)>,
     //     Query<(Entity, &Position, &BoxCollider, &Scale)>,
     // )>,
+    time: Res<Time>,
     mut query: Query<(
         NameOrEntity,
         &mut Velocity,
@@ -338,25 +343,12 @@ fn handle_box_collisions(
         &Scale,
     )>,
 ) {
-    fn edge_pos(
-        pos: &Position,
-        scale: &Scale,
-        vel: Option<&Velocity>,
-        direction: Direction,
-    ) -> f32 {
+    fn edge_pos(pos: &Position, scale: &Scale, direction: Edge) -> f32 {
         match direction {
-            Direction::Up => {
-                pos.0.y + scale.0.y / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.y
-            }
-            Direction::Down => {
-                pos.0.y - scale.0.y / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.y
-            }
-            Direction::Left => {
-                pos.0.x - scale.0.x / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.x
-            }
-            Direction::Right => {
-                pos.0.x + scale.0.x / 2.0 + vel.unwrap_or(&Velocity(Vec2 { x: 0.0, y: 0.0 })).0.x
-            }
+            Edge::Top => pos.0.y + scale.0.y / 2.0,
+            Edge::Bottom => pos.0.y - scale.0.y / 2.0,
+            Edge::Left => pos.0.x - scale.0.x / 2.0,
+            Edge::Right => pos.0.x + scale.0.x / 2.0,
         }
     }
 
@@ -372,16 +364,16 @@ fn handle_box_collisions(
             continue;
         }
 
-        if edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Right)
-            > edge_pos(&position_2, &scale_2, None, Direction::Left)
-            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Left)
-                < edge_pos(&position_2, &scale_2, None, Direction::Right)
-            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Up)
-                > edge_pos(&position_2, &scale_2, None, Direction::Down)
-            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Down)
-                < edge_pos(&position_2, &scale_2, None, Direction::Up)
+        if edge_pos(&position_1, &scale_1, Edge::Right) + (velocity_1.0.x * time.delta_secs())
+            > edge_pos(&position_2, &scale_2, Edge::Left) + (velocity_2.0.x * time.delta_secs())
+            && edge_pos(&position_1, &scale_1, Edge::Left) + (velocity_1.0.x * time.delta_secs())
+                < edge_pos(&position_2, &scale_2, Edge::Right)
+                    + (velocity_2.0.x * time.delta_secs())
+            && edge_pos(&position_1, &scale_1, Edge::Top)
+                > edge_pos(&position_2, &scale_2, Edge::Bottom)
+            && edge_pos(&position_1, &scale_1, Edge::Bottom)
+                < edge_pos(&position_2, &scale_2, Edge::Top)
         {
-            info!("{:?} colliding with {:?}", entity_1.name, entity_2.name);
             if !collider_1.kinematic {
                 velocity_1.0.x *= -1.0;
                 velocity_1.0.y += velocity_2.0.y
@@ -394,14 +386,15 @@ fn handle_box_collisions(
             }
         }
 
-        if edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Right)
-            > edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Left)
-            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Left)
-                < edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Right)
-            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Up)
-                > edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Down)
-            && edge_pos(&position_1, &scale_1, Some(&velocity_1), Direction::Down)
-                < edge_pos(&position_2, &scale_2, Some(&velocity_2), Direction::Up)
+        if edge_pos(&position_1, &scale_1, Edge::Right)
+            > edge_pos(&position_2, &scale_2, Edge::Left)
+            && edge_pos(&position_1, &scale_1, Edge::Left)
+                < edge_pos(&position_2, &scale_2, Edge::Right)
+            && edge_pos(&position_1, &scale_1, Edge::Top) + (velocity_1.0.y * time.delta_secs())
+                > edge_pos(&position_2, &scale_2, Edge::Bottom)
+                    + (velocity_2.0.y * time.delta_secs())
+            && edge_pos(&position_1, &scale_1, Edge::Bottom) + (velocity_1.0.y * time.delta_secs())
+                < edge_pos(&position_2, &scale_2, Edge::Top) + (velocity_2.0.y * time.delta_secs())
         {
             if !collider_1.kinematic {
                 velocity_1.0.y *= -1.0;
