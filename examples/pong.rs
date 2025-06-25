@@ -1,4 +1,6 @@
 use bevy::{log::tracing::Instrument, prelude::*, window::WindowResolution};
+use bevy_egui::EguiPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use rand::random_range;
 
 pub const BASE: Color = Color::srgb(0.117647059, 0.117647059, 0.180392157);
@@ -18,12 +20,17 @@ fn main() {
                 ..default()
             }),
             PongPlugin,
+            EguiPlugin {
+                enable_multipass_for_primary_context: true,
+            },
+            WorldInspectorPlugin::new(),
         ))
         .insert_resource(ClearColor(BASE))
         .run();
 }
 
 #[derive(Component, Default)]
+/// This is a paddle
 struct Paddle {
     input_direction: InputDirection,
     player: u8,
