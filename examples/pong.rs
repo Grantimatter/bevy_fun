@@ -1,6 +1,10 @@
-use bevy::{log::tracing::Instrument, prelude::*, window::WindowResolution};
-use bevy_egui::EguiPlugin;
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use std::ops::RangeInclusive;
+
+use bevy::{
+    math::bounding::{Aabb2d, BoundingVolume, IntersectsVolume},
+    prelude::*,
+    window::WindowResolution,
+};
 use rand::random_range;
 
 pub const BASE: Color = Color::srgb(0.117647059, 0.117647059, 0.180392157);
@@ -20,23 +24,38 @@ fn main() {
                 ..default()
             }),
             PongPlugin,
-            EguiPlugin {
-                enable_multipass_for_primary_context: true,
-            },
-            WorldInspectorPlugin::new(),
         ))
         .insert_resource(ClearColor(BASE))
         .run();
 }
 
+#[derive(Resource)]
+struct StartupTimer(Timer);
+
 #[derive(Component, Default)]
-/// This is a paddle
+#[require(Position,
+    Shape = Shape(Vec2 { x: 4.0, y: 20.0 }),
+    Velocity,
+    Speed = Speed(80.0),
+    Drag = Drag(0.05),
+    BoxCollider = BoxCollider {kinematic: true, ..default()},
+    Sprite = Sprite::from_color(TEXT, Vec2 { x: 1.0, y: 1.0 })
+)]
 struct Paddle {
     input_direction: InputDirection,
     player: u8,
 }
 
 #[derive(Component)]
+#[require(
+    Name = Name::new("Ball"),
+    Position = Position(Vec2 { x: 50.0, y: 50.0 }),
+    Shape = Shape(Vec2 { x: 4.0, y: 4.0 }),
+    Velocity,
+    Speed = Speed(40.0),
+    BoxCollider = BoxCollider {kinematic: false, friction: 0.5},
+    Sprite = Sprite::from_color(TEXT, Vec2 { x: 1.0, y: 1.0 }),
+)]
 struct Ball;
 
 #[derive(Component, Default)]
@@ -50,12 +69,12 @@ struct InputDirection(Vec2);
 #[require(Transform)]
 struct Speed(f32);
 
-#[derive(Component)]
-#[require(Transform)]
+#[derive(Component, Default)]
+#[require(Transform, Velocity)]
 struct Drag(f32);
 
 #[derive(Component)]
-#[require(Transform, Position, Velocity, Scale)]
+#[require(Transform, Position, Velocity, Shape)]
 struct BoxCollider {
     kinematic: bool,
     friction: f32,
@@ -70,7 +89,8 @@ impl Default for BoxCollider {
     }
 }
 
-pub enum Edge {
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum Collision {
     Top,
     Bottom,
     Left,
@@ -84,11 +104,24 @@ pub enum Edge {
 #[require(Transform)]
 struct Position(Vec2);
 
-/// Scale as % of screen in the x and y axis
+/// Shape as % of screen in the x and y axis
 /// (100, 100) is a rect that fills the window exactly
 #[derive(Component, Default)]
 #[require(Transform)]
-struct Scale(Vec2);
+struct Shape(Vec2);
+
+#[derive(Component)]
+struct Player;
+
+#[derive(Component)]
+struct Ai;
+
+#[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+enum DebugMode {
+    #[default]
+    None,
+    Debug,
+}
 
 #[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 enum GameState {
@@ -100,17 +133,42 @@ enum GameState {
 #[derive(SubStates, Clone, PartialEq, Eq, Hash, Debug, Default)]
 #[source(GameState = GameState::Playing)]
 enum GamePhase {
-    // #[default]
-    Starting,
     #[default]
+    Starting,
     Rally,
-    Score,
+    Scoring,
 }
+
+#[derive(Component)]
+enum Scorer {
+    Player,
+    Ai,
+}
+
+#[derive(Event)]
+struct ScoredEvent(Scorer);
+
+#[derive(Resource, Default)]
+struct Score {
+    player: u32,
+    ai: u32,
+}
+
+#[derive(Component, Default)]
+#[require(
+    Text = Text::new("0"),
+    TextColor = TextColor(TEXT),
+    TextFont = TextFont {font_size: 60.0, ..default() },
+    TextLayout = TextLayout::new_with_justify(JustifyText::Center),
+    Scorer = Scorer::Player,
+)]
+struct ScoreCard;
 
 pub struct PongPlugin;
 
 impl Plugin for PongPlugin {
     fn build(&self, app: &mut App) {
+        app.insert_resource(StartupTimer(Timer::from_seconds(2.0, TimerMode::Once)));
         app.add_systems(Startup, setup);
         app.add_systems(PreUpdate, (handle_keyboard_input, handle_gamepad_input));
         app.add_systems(
@@ -119,22 +177,28 @@ impl Plugin for PongPlugin {
                 apply_paddle_input,
                 apply_drag,
                 apply_velocity,
-                handle_box_collisions,
+                handle_collisions,
+                handle_ai_paddle,
+                kill_offscreen,
+                detect_scoring,
+                reset_ball,
+                update_score,
+                update_score_display,
             )
                 .run_if(in_state(GamePhase::Rally))
                 .chain(),
         );
+        app.add_systems(Update, (game_startup).run_if(in_state(GamePhase::Starting)));
+        app.add_systems(PostUpdate, (position_translation, scale_to_window).chain());
         app.add_systems(
             PostUpdate,
-            (
-                position_translation,
-                scale_to_window,
-                draw_box_collider_gizmos,
-            )
-                .chain(),
+            (draw_box_collider_gizmos).run_if(in_state(DebugMode::Debug)),
         );
         app.init_state::<GameState>();
         app.add_sub_state::<GamePhase>();
+        app.init_state::<DebugMode>();
+        app.add_event::<ScoredEvent>();
+        app.init_resource::<Score>();
     }
 }
 
@@ -142,13 +206,10 @@ fn setup(mut commands: Commands) {
     // Spawn Camera
     commands.spawn(Camera2d);
 
-    let paddle_sprite = Sprite::from_color(TEXT, Vec2 { x: 1.0, y: 1.0 });
-
     // Spawn Barriers
     commands.spawn((
         Position(Vec2 { x: 50.0, y: 102.5 }),
-        Velocity(Vec2 { x: 0.0, y: 0.0 }),
-        Scale(Vec2 { x: 100.0, y: 5.0 }),
+        Shape(Vec2 { x: 100.0, y: 5.0 }),
         BoxCollider {
             kinematic: true,
             ..Default::default()
@@ -157,8 +218,7 @@ fn setup(mut commands: Commands) {
 
     commands.spawn((
         Position(Vec2 { x: 50.0, y: -2.5 }),
-        Velocity(Vec2 { x: 0.0, y: 0.0 }),
-        Scale(Vec2 { x: 100.0, y: 5.0 }),
+        Shape(Vec2 { x: 100.0, y: 5.0 }),
         BoxCollider {
             kinematic: true,
             ..Default::default()
@@ -172,33 +232,36 @@ fn setup(mut commands: Commands) {
             player: 1,
             ..default()
         },
-        paddle_sprite.clone(),
         Position(Vec2 { x: 10.0, y: 50.0 }),
-        Scale(Vec2 { x: 4.0, y: 20.0 }),
-        Velocity(Vec2 { x: 0.0, y: 0.0 }),
-        Speed(80.0),
-        Drag(0.05),
-        BoxCollider {
-            kinematic: true,
-            ..Default::default()
-        },
     ));
 
     commands.spawn((
         Name::new("Right Paddle"),
+        Ai,
         Paddle {
             player: 2,
             ..default()
         },
-        paddle_sprite,
         Position(Vec2 { x: 90.0, y: 50.0 }),
-        Scale(Vec2 { x: 4.0, y: 20.0 }),
-        Velocity(Vec2 { x: 0.0, y: 0.0 }),
-        Speed(80.0),
-        Drag(0.05),
-        BoxCollider {
-            kinematic: true,
-            ..Default::default()
+    ));
+
+    commands.spawn((
+        ScoreCard,
+        Scorer::Player,
+        Node {
+            top: Val::Percent(10.0),
+            left: Val::Percent(20.0),
+            ..default()
+        },
+    ));
+
+    commands.spawn((
+        ScoreCard,
+        Scorer::Ai,
+        Node {
+            top: Val::Percent(10.0),
+            left: Val::Percent(80.0),
+            ..default()
         },
     ));
 
@@ -208,12 +271,7 @@ fn setup(mut commands: Commands) {
 
 fn spawn_ball(mut commands: Commands) {
     commands.spawn((
-        Name::new("Ball"),
         Ball,
-        Sprite::from_color(TEXT, Vec2 { x: 1.0, y: 1.0 }),
-        Position(Vec2 { x: 50.0, y: 50.0 }),
-        Scale(Vec2 { x: 4.0, y: 4.0 }),
-        Speed(40.0),
         Velocity(Vec2 {
             x: if random_range(0..=1) == 0 {
                 -40.0
@@ -222,10 +280,6 @@ fn spawn_ball(mut commands: Commands) {
             },
             y: random_range(-1.0..1.0) * 40.0,
         }),
-        BoxCollider {
-            friction: 0.5,
-            ..Default::default()
-        },
     ));
 }
 
@@ -236,7 +290,7 @@ fn position_translation(mut query: Query<(&Position, &mut Transform)>, window: S
     }
 }
 
-fn scale_to_window(mut query: Query<(&Scale, &mut Transform)>, window: Single<&Window>) {
+fn scale_to_window(mut query: Query<(&Shape, &mut Transform)>, window: Single<&Window>) {
     for (scale, mut transform) in query.iter_mut() {
         transform.scale.x = scale.0.x * 0.01 * window.width();
         transform.scale.y = scale.0.y * 0.01 * window.height();
@@ -256,6 +310,15 @@ fn apply_drag(time: Res<Time>, mut query: Query<(&mut Velocity, &Drag)>) {
         }
         let vel = velocity.0;
         velocity.0 -= vel * (drag.0.clamp(0.0, 1.0));
+    }
+}
+
+fn handle_ai_paddle(
+    mut ai_paddle: Query<&mut Position, (With<Ai>, With<Paddle>, Without<Ball>)>,
+    ball: Single<&Position, With<Ball>>,
+) {
+    for mut position in &mut ai_paddle {
+        position.0.y = ball.0.y;
     }
 }
 
@@ -336,82 +399,45 @@ fn apply_paddle_input(mut query: Query<(&Paddle, &Speed, &Position, &mut Velocit
     }
 }
 
-fn handle_box_collisions(
-    // mut colliders: ParamSet<(
-    //     Query<(Entity, &mut Velocity, &mut Position, &BoxCollider, &Scale)>,
-    //     Query<(Entity, &Position, &BoxCollider, &Scale)>,
-    // )>,
-    time: Res<Time>,
-    mut query: Query<(
-        NameOrEntity,
-        &mut Velocity,
-        &mut Position,
-        &BoxCollider,
-        &Scale,
-    )>,
-) {
-    fn edge_pos(pos: &Position, scale: &Scale, direction: Edge) -> f32 {
-        match direction {
-            Edge::Top => pos.0.y + scale.0.y / 2.0,
-            Edge::Bottom => pos.0.y - scale.0.y / 2.0,
-            Edge::Left => pos.0.x - scale.0.x / 2.0,
-            Edge::Right => pos.0.x + scale.0.x / 2.0,
-        }
+fn collide_with_side(this: Aabb2d, other: Aabb2d) -> Option<Collision> {
+    if !this.intersects(&other) {
+        return None;
     }
 
-    let mut combos = query.iter_combinations_mut();
-    while let Some(
-        [
-            (entity_1, mut velocity_1, mut position_1, collider_1, scale_1),
-            (entity_2, mut velocity_2, mut position_2, collider_2, scale_2),
-        ],
-    ) = combos.fetch_next()
-    {
-        if entity_1.entity == entity_2.entity || (collider_1.kinematic && collider_2.kinematic) {
-            continue;
+    let closest = other.closest_point(this.center());
+    let offset = this.center() - closest;
+    let side = if offset.x.abs() > offset.y.abs() {
+        if offset.x < 0.0 {
+            Collision::Left
+        } else {
+            Collision::Right
         }
+    } else if offset.y > 0.0 {
+        Collision::Top
+    } else {
+        Collision::Bottom
+    };
 
-        if edge_pos(&position_1, &scale_1, Edge::Right) + (velocity_1.0.x * time.delta_secs())
-            > edge_pos(&position_2, &scale_2, Edge::Left) + (velocity_2.0.x * time.delta_secs())
-            && edge_pos(&position_1, &scale_1, Edge::Left) + (velocity_1.0.x * time.delta_secs())
-                < edge_pos(&position_2, &scale_2, Edge::Right)
-                    + (velocity_2.0.x * time.delta_secs())
-            && edge_pos(&position_1, &scale_1, Edge::Top)
-                > edge_pos(&position_2, &scale_2, Edge::Bottom)
-            && edge_pos(&position_1, &scale_1, Edge::Bottom)
-                < edge_pos(&position_2, &scale_2, Edge::Top)
-        {
-            if !collider_1.kinematic {
-                velocity_1.0.x *= -1.0;
-                velocity_1.0.y += velocity_2.0.y
-                    * ((collider_1.friction + collider_2.friction) / 2.0).clamp(0.0, 1.0);
-            }
-            if !collider_2.kinematic {
-                velocity_2.0.x *= -1.0;
-                velocity_2.0.y += velocity_1.0.y
-                    * ((collider_2.friction + collider_1.friction) / 2.0).clamp(0.0, 1.0);
-            }
-        }
+    Some(side)
+}
 
-        if edge_pos(&position_1, &scale_1, Edge::Right)
-            > edge_pos(&position_2, &scale_2, Edge::Left)
-            && edge_pos(&position_1, &scale_1, Edge::Left)
-                < edge_pos(&position_2, &scale_2, Edge::Right)
-            && edge_pos(&position_1, &scale_1, Edge::Top) + (velocity_1.0.y * time.delta_secs())
-                > edge_pos(&position_2, &scale_2, Edge::Bottom)
-                    + (velocity_2.0.y * time.delta_secs())
-            && edge_pos(&position_1, &scale_1, Edge::Bottom) + (velocity_1.0.y * time.delta_secs())
-                < edge_pos(&position_2, &scale_2, Edge::Top) + (velocity_2.0.y * time.delta_secs())
-        {
-            if !collider_1.kinematic {
-                velocity_1.0.y *= -1.0;
-                velocity_1.0.x += velocity_2.0.x
-                    * ((collider_1.friction + collider_2.friction) / 2.0).clamp(0.0, 1.0);
-            }
-            if !collider_2.kinematic {
-                velocity_2.0.y *= -1.0;
-                velocity_2.0.x += velocity_1.0.x
-                    * ((collider_2.friction + collider_1.friction) / 2.0).clamp(0.0, 1.0);
+fn handle_collisions(
+    mut ball: Query<(&mut Velocity, &Position, &Shape), With<Ball>>,
+    other_things: Query<(&Position, &Velocity, &Shape), Without<Ball>>,
+) {
+    for (mut ball_velocity, ball_position, ball_shape) in &mut ball {
+        for (position, velocity, shape) in &other_things {
+            if let Some(collision) = collide_with_side(
+                Aabb2d::new(ball_position.0, ball_shape.0 / 2.0),
+                Aabb2d::new(position.0, shape.0 / 2.0),
+            ) {
+                match collision {
+                    Collision::Top | Collision::Bottom => ball_velocity.0.y *= -1.0,
+                    Collision::Left | Collision::Right => {
+                        ball_velocity.0.x *= -1.0;
+                        ball_velocity.0.y += velocity.0.y * 0.3;
+                    }
+                }
             }
         }
     }
@@ -419,14 +445,85 @@ fn handle_box_collisions(
 
 fn draw_box_collider_gizmos(mut gizmos: Gizmos, query: Query<(&Transform, &BoxCollider)>) {
     for (transform, collider) in query {
-        //     gizmos.rect_2d(
-        //         Isometry2d::from_translation(transform.translation.truncate()),
-        //         transform.scale.truncate(),
-        //         if collider.kinematic {
-        //             Color::srgb(1.0, 0.0, 0.0)
-        //         } else {
-        //             Color::srgb(0.0, 0.0, 1.0)
-        //         },
-        //     );
+        gizmos.rect_2d(
+            Isometry2d::from_translation(transform.translation.truncate()),
+            transform.scale.truncate(),
+            if collider.kinematic {
+                Color::srgb(1.0, 0.0, 0.0)
+            } else {
+                Color::srgb(0.0, 0.0, 1.0)
+            },
+        );
+    }
+}
+
+fn game_startup(
+    time: Res<Time>,
+    mut timer: ResMut<StartupTimer>,
+    mut next_state: ResMut<NextState<GamePhase>>,
+) {
+    timer.0.tick(time.delta());
+    if timer.0.just_finished() {
+        next_state.set(GamePhase::Rally);
+    }
+}
+
+fn kill_offscreen(mut commands: Commands, query: Query<(Entity, &Position)>) {
+    for (entity, position) in query {
+        // Kill entity if it is over 100 units from the center of the screen
+        if position.0.distance(Vec2 { x: 50.0, y: 50.0 }) > 80.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+fn detect_scoring(
+    mut ball: Single<&mut Position, With<Ball>>,
+    mut events: EventWriter<ScoredEvent>,
+) {
+    if ball.0.x > 100.0 {
+        events.write(ScoredEvent(Scorer::Player));
+    } else if ball.0.x < 0.0 {
+        events.write(ScoredEvent(Scorer::Ai));
+    }
+}
+
+fn reset_ball(
+    mut commands: Commands,
+    mut balls: Query<(&mut Position, &mut Velocity), With<Ball>>,
+    mut events: EventReader<ScoredEvent>,
+) {
+    for event in events.read() {
+        for (mut position, mut velocity) in balls.iter_mut() {
+            position.0 = Vec2::new(50.0, 50.0);
+            match event.0 {
+                Scorer::Player => velocity.0 = Vec2::new(1.0, random_range(-1.0..=1.0)) * 40.0,
+                Scorer::Ai => velocity.0 = Vec2::new(-1.0, random_range(-1.0..=1.0)) * 40.0,
+            }
+        }
+    }
+}
+
+fn update_score(mut score: ResMut<Score>, mut events: EventReader<ScoredEvent>) {
+    for event in events.read() {
+        match event.0 {
+            Scorer::Player => score.player += 1,
+            Scorer::Ai => score.ai += 1,
+        }
+    }
+}
+
+fn update_score_display(
+    score: Res<Score>,
+    mut query: Query<(&mut Text, &Scorer)>,
+    mut events: EventReader<ScoredEvent>,
+) {
+    for _event in events.read() {
+        for (mut text, scorer) in &mut query {
+            match scorer {
+                Scorer::Player => text.0 = score.player.to_string(),
+                Scorer::Ai => text.0 = score.ai.to_string(),
+            }
+        }
     }
 }
