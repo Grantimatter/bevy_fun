@@ -513,17 +513,14 @@ fn update_score(mut score: ResMut<Score>, mut events: EventReader<ScoredEvent>) 
     }
 }
 
-fn update_score_display(
-    score: Res<Score>,
-    mut query: Query<(&mut Text, &Scorer)>,
-    mut events: EventReader<ScoredEvent>,
-) {
-    for _event in events.read() {
-        for (mut text, scorer) in &mut query {
-            match scorer {
-                Scorer::Player => text.0 = score.player.to_string(),
-                Scorer::Ai => text.0 = score.ai.to_string(),
-            }
+fn update_score_display(score: Res<Score>, mut query: Query<(&mut Text, &Scorer)>) {
+    if !score.is_changed() {
+        return;
+    }
+    for (mut text, scorer) in &mut query {
+        match scorer {
+            Scorer::Player => text.0 = score.player.to_string(),
+            Scorer::Ai => text.0 = score.ai.to_string(),
         }
     }
 }
